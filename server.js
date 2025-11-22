@@ -28,6 +28,17 @@ app.use(
 );
 app.use(express.json({ limit: "10kb" }));
 app.use(express.urlencoded({ extended: true }));
+const BREVO_SMTP_CONFIG = {
+  host: process.env.SMTP_HOST,
+  port: Number(process.env.SMTP_PORT),
+  secure: false,
+  auth: {
+    user: process.env.SMTP_USER,
+    pass: process.env.SMTP_PASSWORD,
+  },
+};
+
+const transporter = nodemailer.createTransport(BREVO_SMTP_CONFIG);
 app.post("/contact", async (req, res) => {
   try {
     const { name, email, phone, service, message } = req.body;
