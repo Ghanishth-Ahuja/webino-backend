@@ -4,7 +4,7 @@ let mongoose = require("mongoose");
 let cors = require("cors");
 let Contact = require("./contact.model.js");
 let app = express();
-const nodemailer = require("nodemailer");
+const Sib = require("@sendinblue/client");
 
 mongoose
   .connect(process.env.MONGO_URI)
@@ -19,7 +19,6 @@ app.use(
   cors({
     origin: [
       "http://127.0.0.1:5500",
-      "http://localhost:5500",
       "https://webinosolutions.com",
     ],
     methods: ["POST"],
@@ -28,67 +27,49 @@ app.use(
 );
 app.use(express.json({ limit: "10kb" }));
 app.use(express.urlencoded({ extended: true }));
-const BREVO_SMTP_CONFIG = {
-  host: process.env.SMTP_HOST,
-  port: Number(process.env.SMTP_PORT),
-  secure: false,
-  auth: {
-    user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASSWORD,
-  },
-};
+// Initialize API client
+const brevoClient = new Sib.TransactionalEmailsApi();
+brevoClient.setApiKey(
+  Sib.TransactionalEmailsApiApiKeys.apiKey,
+  process.env.BREVO_API_KEY
+);
 
-const transporter = nodemailer.createTransport(BREVO_SMTP_CONFIG);
+// Simple escape function
+const escapeHTML = (s) =>
+  String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
 app.post("/contact", async (req, res) => {
   try {
     const { name, email, phone, service, message } = req.body;
 
-    // Basic validations
-    if (!name || !email || !message || !phone || !service) {
-      return res.status(400).json({
-        success: false,
-        message: "All fields are required",
-      });
+    // --- VALIDATIONS ---
+    if (!name || !email || !phone || !service || !message) {
+      return res
+        .status(400)
+        .json({ success: false, message: "All fields required" });
     }
 
-    // Basic safe regex checks (not strict)
     if (!/^\S+@\S+\.\S+$/.test(email)) {
       return res.status(400).json({ success: false, message: "Invalid email" });
     }
+
     if (!/^[0-9]{10}$/.test(phone)) {
       return res.status(400).json({ success: false, message: "Invalid phone" });
     }
 
-    // Escape HTML (prevents HTML breaking in email)
-    const safe = (str) =>
-      String(str)
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;");
+    // --- ESCAPED DATA ---
+    const safe = {
+      name: escapeHTML(name),
+      email: escapeHTML(email),
+      phone: escapeHTML(phone),
+      service: escapeHTML(service),
+      message: escapeHTML(message),
+    };
 
-    const safeName = safe(name);
-    const safeEmail = safe(email);
-    const safePhone = safe(phone);
-    const safeService = safe(service);
-    const safeMessage = safe(message);
+    // --- SAVE TO DB ---
+    const contact = await Contact.create(safe);
 
-    // Store in DB
-    const contact = await Contact.create({
-      name: safeName,
-      email: safeEmail,
-      phone: safePhone,
-      service: safeService,
-      message: safeMessage,
-    });
-
-    if (!contact) {
-      return res.status(500).json({
-        success: false,
-        message: "Database error",
-      });
-    }
-
-    const formattedTime = new Date(contact.createdAt).toLocaleString("en-IN", {
+    const sentAt = new Date(contact.createdAt).toLocaleString("en-IN", {
       weekday: "long",
       year: "numeric",
       month: "long",
@@ -97,45 +78,36 @@ app.post("/contact", async (req, res) => {
       minute: "2-digit",
     });
 
-    // Construct email body (use HTML field)
-    const htmlBody = `
-      <h2>Naya data aya hai user ka, fatafat check kar le</h2>
-
-      <p><strong>Name:</strong> ${safeName}</p>
-      <p><strong>Email:</strong> ${safeEmail}</p>
-      <p><strong>Phone:</strong> ${safePhone}</p>
-      <p><strong>Service:</strong> ${safeService}</p>
-      <p><strong>Message:</strong><br>${safeMessage}</p>
-
+    // --- HTML EMAIL BODY ---
+    const html = `
+      <h2>Client ki nayi query hai, fatafat check kar</h2>
+      <p><strong>Name:</strong> ${safe.name}</p>
+      <p><strong>Email:</strong> ${safe.email}</p>
+      <p><strong>Phone:</strong> ${safe.phone}</p>
+      <p><strong>Service:</strong> ${safe.service}</p>
+      <p><strong>Message:</strong> ${safe.message}</p>
       <hr>
-
-      <p>Sent at: ${formattedTime}</p>
+      <p>Sent At: ${sentAt}</p>
     `;
-    const mailOptions = {
-      from: process.env.SENDER_MAIL,
-      to: process.env.RECEIVER_MAIL,
-      subject: "New Service Query",
-      html: htmlBody,
-      replyTo: safeEmail,
-    };
 
-    try {
-      const info = await transporter.sendMail(mailOptions);
-      console.log("Email sent:", info.messageId);
-    } catch (emailError) {
-      console.error("Error sending email:", emailError);
-      return res.status(500).json({
-        success: false,
-        message: "Failed to send email",
-      });
-    }
+    // --- SEND EMAIL via BREVO API (@sendinblue/client) ---
+    await brevoClient.sendTransacEmail({
+      sender: {
+        email: process.env.SENDER_MAIL,
+        name: "Webino",
+      },
+      to: [{ email: process.env.RECEIVER_MAIL }],
+      replyTo: { email: safe.email },
+      subject: "New Service Query",
+      htmlContent: html,
+    });
 
     return res.status(200).json({
       success: true,
       message: "Thanks for contacting us!",
     });
-  } catch (error) {
-    console.error("Server error:", error);
+  } catch (err) {
+    console.error("Error:", err);
     return res.status(500).json({
       success: false,
       message: "Internal server error",
